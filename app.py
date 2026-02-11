@@ -6,14 +6,24 @@ import os
 from pathlib import Path
 
 import streamlit as st
+from streamlit.errors import StreamlitSecretNotFoundError
 
 from reddit_anthropic_insights import run_pipeline
 
 
 def _get_secret(name: str, fallback: str = "") -> str:
-    if name in st.secrets:
-        return str(st.secrets[name]).strip()
-    return os.getenv(name, fallback).strip()
+    env_value = os.getenv(name)
+    if env_value:
+        return env_value.strip()
+
+    try:
+        secret_value = st.secrets.get(name)
+    except StreamlitSecretNotFoundError:
+        secret_value = None
+
+    if secret_value is not None:
+        return str(secret_value).strip()
+    return fallback.strip()
 
 
 st.set_page_config(page_title="Reddit Insight Analyzer", page_icon=":mag:", layout="wide")
