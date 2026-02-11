@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: reddit-insight-analyzer
+    runtime: docker
+    plan: starter
+    autoDeploy: true
+    envVars:
+      - key: REDDIT_CLIENT_ID
+        sync: false
+      - key: REDDIT_CLIENT_SECRET
+        sync: false
+      - key: REDDIT_USER_AGENT
+        value: reddit-insight-app/1.0 by service
+      - key: CLAUDE_BASE_URL
+        sync: false
+      - key: CLAUDE_API_KEY
+        sync: false
+      - key: CLAUDE_MODEL
+        value: claude-opus-4-5
+      - key: ACCESS_PASSCODE
+        sync: false
