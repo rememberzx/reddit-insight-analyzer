@@ -56,8 +56,6 @@ if missing:
         "服务端凭证未配置完整。缺失: " + ", ".join(missing) +
         "。请在部署平台环境变量或 .streamlit/secrets.toml 中设置。"
     )
-else:
-    st.success("服务端凭证已加载，前端已隐藏凭证输入。")
 
 if access_passcode:
     if "authorized" not in st.session_state:
