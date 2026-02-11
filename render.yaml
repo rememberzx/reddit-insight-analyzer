@@ -2,7 +2,7 @@ services:
   - type: web
     name: reddit-insight-analyzer
     runtime: docker
-    plan: starter
+    plan: free
     autoDeploy: true
     envVars:
       - key: REDDIT_CLIENT_ID
