@@ -10,14 +10,18 @@ Outputs:
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
+import re
 import statistics
+import time
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import praw
 from anthropic import Anthropic
@@ -129,8 +133,35 @@ def init_anthropic_client(
 ) -> Anthropic:
     key = api_key or required_env("ANTHROPIC_API_KEY")
     if base_url:
+        _validate_base_url_runtime(base_url)
+    if base_url:
         return Anthropic(api_key=key, base_url=base_url)
     return Anthropic(api_key=key)
+
+
+def _validate_base_url_runtime(base_url: str) -> None:
+    parsed = urlparse(base_url)
+    host = (parsed.hostname or "").strip().lower()
+    if not host:
+        return
+
+    is_private_host = False
+    if host in {"localhost", "127.0.0.1"}:
+        is_private_host = True
+    else:
+        try:
+            ip = ipaddress.ip_address(host)
+            if ip.is_private or ip.is_loopback:
+                is_private_host = True
+        except ValueError:
+            is_private_host = False
+
+    # Render runtime cannot reach your local/LAN gateway directly.
+    if os.getenv("RENDER") and is_private_host:
+        raise RuntimeError(
+            "CLAUDE_BASE_URL points to a private/local address, which is unreachable from Render. "
+            "Please use a public/reachable gateway endpoint, or deploy the gateway in the same network."
+        )
 
 
 def parse_json_response(raw_text: str) -> dict[str, Any]:
@@ -155,12 +186,26 @@ def call_llm_json(
     prompt: str,
     max_tokens: int = 4096,
 ) -> dict[str, Any]:
-    message = anthropic_client.messages.create(
-        model=model,
-        max_tokens=max_tokens,
-        temperature=0.1,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            message = anthropic_client.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                temperature=0.1,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            break
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            err = str(exc).lower()
+            retryable = "timeout" in err or "timed out" in err or "connection" in err
+            if attempt < 2 and retryable:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            raise
+    else:
+        raise RuntimeError(f"LLM request failed after retries: {last_exc}")
 
     text_chunks: list[str] = []
     for block in message.content:
@@ -350,7 +395,7 @@ def fetch_posts_for_tasks(
             dedup[p.id] = RedditPost(
                 post_id=p.id,
                 title=p.title or "",
-                selftext=(p.selftext or "")[:4000],
+                selftext=(p.selftext or "")[:1400],
                 subreddit=str(p.subreddit),
                 score=int(p.score or 0),
                 num_comments=int(p.num_comments or 0),
@@ -364,13 +409,49 @@ def fetch_posts_for_tasks(
     return list(dedup.values())
 
 
+def build_fallback_tasks_from_question(
+    research_question: str,
+    total_limit: int,
+) -> list[dict[str, Any]]:
+    token_candidates = re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]{2,}", research_question)
+    seen: set[str] = set()
+    tokens: list[str] = []
+    for token in token_candidates:
+        t = token.lower()
+        if t in seen:
+            continue
+        seen.add(t)
+        tokens.append(token)
+
+    queries: list[str] = []
+    if research_question.strip():
+        queries.append(research_question.strip())
+    queries.extend(tokens[:8])
+
+    if not queries:
+        return []
+
+    per_limit = max(3, total_limit // max(1, len(queries)))
+    return [
+        {
+            "query": q,
+            "subreddit": "all",
+            "sort": "relevance",
+            "time_filter": "all",
+            "limit": per_limit,
+            "rationale": "Fallback extraction from raw research question.",
+        }
+        for q in queries
+    ]
+
+
 def build_analysis_prompt(research_question: str, posts: list[RedditPost]) -> str:
     compact_posts = [
         {
             "id": p.post_id,
             "subreddit": p.subreddit,
             "title": p.title,
-            "body": p.selftext,
+            "body": p.selftext[:900],
             "score": p.score,
             "comments": p.num_comments,
             "url": p.permalink,
@@ -718,7 +799,22 @@ def run_pipeline(
         total_limit=limit,
     )
     if not posts:
-        raise RuntimeError("No posts fetched from planned tasks. Please adjust question or settings.")
+        fallback_tasks = build_fallback_tasks_from_question(
+            research_question=research_question,
+            total_limit=limit,
+        )
+        posts = fetch_posts_for_tasks(
+            reddit=reddit,
+            tasks=fallback_tasks,
+            total_limit=limit,
+        )
+        if fallback_tasks:
+            plan["tasks"] = (plan.get("tasks", []) or []) + fallback_tasks
+        if not posts:
+            raise RuntimeError(
+                "No posts fetched from planned and fallback tasks. "
+                "Try broader question, fix brand spelling, or use subreddit=all/time_filter=all."
+            )
 
     analysis = analyze_posts(
         anthropic_client=anthropic_client,
